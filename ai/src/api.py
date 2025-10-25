@@ -19,16 +19,10 @@ def px_to_ttc(px_proxy: float|None, speed_mps: float)->float|None:
     if px_proxy is None or speed_mps<0.1: return None
     return (40.0*px_proxy)/max(speed_mps,0.1)
 
-@app.post("/infer_frame")
-async def infer_frame(
-    image: UploadFile = File(...),
-    telemetry: str = Form(...),   # <-- accept as string from multipart
-):
-    # Parse telemetry JSON string into the Pydantic model
-    telemetry_obj = TelemetryIn.model_validate_json(telemetry)
-
-    data = await image.read()
-    bgr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+# New function to process image and telemetry, returning cues
+def process_image_and_telemetry(image_bytes: bytes, telemetry_json: str):
+    telemetry_obj = TelemetryIn.model_validate_json(telemetry_json)
+    bgr = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
 
     dets = det.infer(bgr)
     lead_proxy = estimate_lead_distance_px(dets, bgr.shape)
@@ -36,6 +30,15 @@ async def infer_frame(
 
     cues = scorer.step(Telemetry(**telemetry_obj.model_dump()), ttc)
     return {"cues": cues, "ttc": ttc, "detections": len(dets)}
+
+@app.post("/infer_frame")
+async def infer_frame(
+    image: UploadFile = File(...),
+    telemetry: str = Form(...),   # <-- accept as string from multipart
+):
+    # This endpoint can now call the new function
+    image_data = await image.read()
+    return process_image_and_telemetry(image_data, telemetry)
 
 @app.post("/end_session")
 async def end_session():
