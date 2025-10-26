@@ -25,9 +25,12 @@ async def test():
         # Send image and some telemetry first
         await websocket.send(image)
         await websocket.send(json.dumps(TELEM_DATA))
+
+        await websocket.send("DONE")
         
         # Initialize a list to store audio chunks
         audio_data = b''
+        idx = 0
 
         while True:
             try:
@@ -36,14 +39,21 @@ async def test():
                     audio_data += message
                 else:
                     print(f"Received JSON: {message}")
+                    if audio_data:
+                        with open(f"output{idx}.mp3", 'wb') as f:
+                            f.write(audio_data)
+                        print(f"Audio saved to output{idx}.mp3")
+                        audio_data = b''
+                        idx += 1
             except websockets.exceptions.ConnectionClosedOK:
                 print("Connection closed")
                 break
 
         # Save the received audio data as a WAV file
         if audio_data:
-            with open("output.mp3", 'wb') as f:
+            with open(f"output{idx}.mp3", 'wb') as f:
                 f.write(audio_data)
-            print("Audio saved to output.mp3")
+            print(f"Audio saved to output{idx}.mp3")
+
 
 asyncio.run(test())

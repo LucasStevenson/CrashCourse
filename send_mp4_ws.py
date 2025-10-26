@@ -5,6 +5,10 @@ import cv2
 import websockets
 import argparse
 import math
+import sounddevice as sd
+import numpy as np
+from pydub import AudioSegment
+from io import BytesIO
 
 
 def gen_telemetry(t: float, speed_limit_mps: float = 13.4) -> dict:
@@ -24,6 +28,33 @@ def gen_telemetry(t: float, speed_limit_mps: float = 13.4) -> dict:
     }
 
 
+def play_audio(audio_bytes):
+    # Decode bytes (assumed MP3 or other compressed format) to PCM audio
+    audio_segment = AudioSegment.from_file(BytesIO(audio_bytes), format="mp3")  # adjust format if needed
+    raw_data = audio_segment.raw_data
+    sample_rate = audio_segment.frame_rate
+    channels = audio_segment.channels
+    sample_width = audio_segment.sample_width
+
+    # Map sample width in bytes to numpy dtype
+    dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
+    dtype = dtype_map.get(sample_width, np.int16)
+
+    # Convert raw PCM bytes to numpy array
+    audio_array = np.frombuffer(raw_data, dtype=dtype)
+
+    # Reshape for multi-channel audio
+    if channels > 1:
+        audio_array = audio_array.reshape(-1, channels)
+
+    # Normalize to float32 between -1.0 and 1.0 for sounddevice
+    max_val = float(2 ** (8 * sample_width - 1))
+    audio_float = audio_array.astype(np.float32) / max_val
+
+    # Play audio and wait for completion
+    sd.play(audio_float, samplerate=sample_rate)
+    sd.wait()
+
 async def stream_video(video_path: str, ws_url: str = "ws://localhost:8765", fps: float = 12.0):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -33,6 +64,9 @@ async def stream_video(video_path: str, ws_url: str = "ws://localhost:8765", fps
     t0 = time.time()
 
     async with websockets.connect(ws_url) as ws:
+        audio_file_idx = 0
+        audio_bytes = b''
+
         try:
             while True:
                 ok, frame = cap.read()
@@ -55,7 +89,13 @@ async def stream_video(video_path: str, ws_url: str = "ws://localhost:8765", fps
 
                 # Optionally read back inference result (non-blocking)
                 try:
-                    resp = await asyncio.wait_for(ws.recv(), timeout=0.5)
+                    while (resp := await asyncio.wait_for(ws.recv(), timeout=2.5)) and isinstance(resp, bytes): # then we are receiving audio bytes
+                        audio_bytes += resp
+                    if audio_bytes:
+                        play_audio(audio_bytes)
+                        audio_bytes = b''
+                        audio_file_idx += 1
+                        continue
                     try:
                         data = json.loads(resp)
                         collided = data.get("collision")

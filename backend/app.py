@@ -202,6 +202,13 @@ async def handler(websocket):
                     connections[connection_id]['frames'].append(img)
                     continue
 
+                # TTS data (TESTING PURPOSES ONLY)
+                # if isinstance(message, str) and message.startswith("TTS:"):
+                #     # Extract text message, e.g. "TTS:Say this to the client"
+                #     tts_text = message[4:].strip()
+                #     await tts_streamer.stream_tts(tts_text, send_audio_chunk)
+                #     continue
+
                 # Telemetry JSON data or control message (`DONE`)
                 try:
                     data = json.loads(message)
@@ -280,15 +287,13 @@ async def handler(websocket):
                                         "session_id": connections[connection_id]['session_id'],
                                         "final": final_result,
                                     }
-                                    outKey = "message"
                                     coach_final = await forward_to_toolhouse(session, final_payload, timeout_s=TOOLHOUSE_FINAL_TIMEOUT_S)
                                     if not coach_final or int(coach_final.get("status", 0)) >= 400:
                                         coach_final = _fallback_final_coach(final_result)
-                                        outKey = "summary"
                                     out["coach"] = coach_final
 
                                     await safe_send(websocket, out)
-                                    await send_tts_msg(out[outKey])
+                                    await send_tts_msg(json.loads(out['coach']['text'])['summary'])
                             except Exception as e:
                                 print(f"Error getting final score: {e}")
                                 # Fallback to displaying error message 
