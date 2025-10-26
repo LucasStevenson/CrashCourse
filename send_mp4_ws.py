@@ -62,7 +62,8 @@ async def stream_video(video_path: str, ws_url: str = "ws://localhost:8765", fps
                         ttc = data.get("ttc")
                         dist = data.get("lead_distance_m")
                         cues = data.get("cues")
-                        print(f"Result: ttc={ttc}  dist_m={dist}  collided={collided}  cues={cues}")
+                        kind = data.get("type", "inference")
+                        print(f"Result[{kind}]: ttc={ttc}  dist_m={dist}  collided={collided}  cues={cues}")
                         coach = data.get("coach")
                         if coach is not None:
                             print("Coach:", coach)
@@ -75,17 +76,29 @@ async def stream_video(video_path: str, ws_url: str = "ws://localhost:8765", fps
 
             # Signal end of session and read final
             await ws.send("DONE")
-            try:
-                final = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            # Drain messages until we receive the one marked as final
+            received_final = False
+            deadline = time.time() + 25.0
+            while time.time() < deadline and not received_final:
                 try:
-                    data = json.loads(final)
+                    msg = await asyncio.wait_for(ws.recv(), timeout=max(0.1, deadline - time.time()))
+                except asyncio.TimeoutError:
+                    break
+                try:
+                    data = json.loads(msg)
+                except Exception:
+                    print("Final (raw):", msg)
+                    continue
+                if data.get("type") == "final":
                     print("Final:", data)
                     if data.get("coach") is not None:
                         print("Coach (final):", data["coach"])
-                except Exception:
-                    print("Final:", final)
-            except asyncio.TimeoutError:
-                print("Final score response timed out")
+                    received_final = True
+                else:
+                    # late in-flight inference; print briefly and continue waiting
+                    print("Late inference after DONE:", data)
+            if not received_final:
+                print("Final score response timed out or missing")
         finally:
             cap.release()
 
