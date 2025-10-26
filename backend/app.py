@@ -47,6 +47,10 @@ def _cue_fingerprint(obs):
 
 
 async def forward_to_toolhouse(session: aiohttp.ClientSession, payload: dict, timeout_s: float = 5.0) -> dict | None:
+    """Example output
+
+    {"cue": "INCREASE_HEADWAY", "cue_level": 0.99, "message": "Increase following distance—too close to vehicle ahead.", "notes": null}
+    """
     if not TOOLHOUSE_URL:
         return None
     headers = {"Content-Type": "application/json"}
@@ -106,6 +110,22 @@ async def safe_send(ws, obj: dict) -> bool:
 
 
 def _fallback_final_coach(final_result: dict) -> dict:
+    """Example Output
+    {
+        "summary": "Excellent lane keeping and smoothness. Some improvement needed in speed control, headway, and compliance. No red light violations, but collisions occurred.",
+        "tips": [
+            "Maintain safe following distance.",
+            "Monitor speed near limits.",
+            "Anticipate hazards to avoid collisions."
+            ],
+        "drills": [
+            "Practice safe headway in traffic.",
+            "Run speed control exercises.",
+            "Complete collision avoidance scenarios."
+            ],
+        "priority": "headway"
+    }
+    """
     subs = final_result.get("subscores", {})
     final = final_result.get("final", 0)
     pri = min(subs, key=subs.get) if subs else "headway"
@@ -163,7 +183,7 @@ async def handler(websocket):
     }
 
     async def send_audio_chunk(chunk):
-        # Send each audio chunk to the client as binary (use a message type header if needed)
+        # Send each audio chunk to the client as binary
         await websocket.send(chunk)
 
     async def send_tts_msg(msg):
@@ -181,13 +201,6 @@ async def handler(websocket):
                     img = cv2.imdecode(np.frombuffer(message, np.uint8), cv2.IMREAD_COLOR)
                     connections[connection_id]['frames'].append(img)
                     continue
-
-                # TTS data (TESTING PURPOSES ONLY)
-                # if isinstance(message, str) and message.startswith("TTS:"):
-                #     # Extract text message, e.g. "TTS:Say this to the client"
-                #     tts_text = message[4:].strip()
-                #     await tts_streamer.stream_tts(tts_text, send_audio_chunk)
-                #     continue
 
                 # Telemetry JSON data or control message (`DONE`)
                 try:
@@ -243,7 +256,9 @@ async def handler(websocket):
                                 out = dict(result)
                                 out["type"] = "inference"
                                 if coach_reply is not None:
+                                    print(coach_reply)
                                     out["coach"] = coach_reply
+                                    await send_tts_msg(json.loads(coach_reply['text'])['message'])
                                 await safe_send(websocket, out)
                         except Exception as e:
                             print(f"Error calling inference API: {e}")
@@ -265,16 +280,19 @@ async def handler(websocket):
                                         "session_id": connections[connection_id]['session_id'],
                                         "final": final_result,
                                     }
+                                    outKey = "message"
                                     coach_final = await forward_to_toolhouse(session, final_payload, timeout_s=TOOLHOUSE_FINAL_TIMEOUT_S)
                                     if not coach_final or int(coach_final.get("status", 0)) >= 400:
                                         coach_final = _fallback_final_coach(final_result)
+                                        outKey = "summary"
                                     out["coach"] = coach_final
 
                                     await safe_send(websocket, out)
+                                    await send_tts_msg(out[outKey])
                             except Exception as e:
                                 print(f"Error getting final score: {e}")
-                                # Fallback to dummy result
-                                result = {"grade": "A", "confidence": 0.97, "type": "final"}
+                                # Fallback to displaying error message 
+                                result = {"errMsg": "Error getting final score"}
                                 await safe_send(websocket, result)
 
                             connections[connection_id]['frames'].clear()
