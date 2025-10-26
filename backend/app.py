@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from dotenv import load_dotenv
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 # Store frames and telemetry for each connection
 connections = {}
@@ -20,6 +21,10 @@ TOOLHOUSE_URL = os.getenv("TOOLHOUSE_URL", "")
 TOOLHOUSE_API_KEY = os.getenv("TOOLHOUSE_API_KEY", "")
 # To conserve runs: throttle forwards and only send when cue changes
 FORWARD_MIN_INTERVAL_S = float(os.getenv("TOOLHOUSE_MIN_INTERVAL_S", "1.0"))
+# Max seconds to wait for final coach response before falling back locally
+TOOLHOUSE_FINAL_TIMEOUT_S = float(os.getenv("TOOLHOUSE_FINAL_TIMEOUT_S", "20.0"))
+# How to send payload to Toolhouse: 'wrapped' (default, uses 'message'), 'wrapped_input' (uses 'input'), or 'raw'
+PAYLOAD_STYLE = os.getenv("TOOLHOUSE_PAYLOAD_STYLE", "wrapped").lower()
 
 
 def _bucket(val, step):
@@ -35,23 +40,111 @@ def _cue_fingerprint(obs):
     return f"{cue}|{lvl}"
 
 
-async def forward_to_toolhouse(session: aiohttp.ClientSession, payload: dict) -> dict | None:
+async def forward_to_toolhouse(session: aiohttp.ClientSession, payload: dict, timeout_s: float = 5.0) -> dict | None:
     if not TOOLHOUSE_URL:
         return None
     headers = {"Content-Type": "application/json"}
     if TOOLHOUSE_API_KEY:
         headers["Authorization"] = f"Bearer {TOOLHOUSE_API_KEY}"
+
+    # Build a wrapped text prompt if requested, improves deterministic JSON replies
+    body = payload
+    if PAYLOAD_STYLE != "raw":
+        obs = json.dumps(payload, ensure_ascii=False)
+        if payload.get("event") == "session_end":
+            # Session summary prompt
+            prompt = (
+                "You are VR Driving Coach AI. Summarize the driver's overall session based on this final score JSON and respond with a SINGLE compact JSON object only, no prose. "
+                "Final: " + obs + ". "
+                "Output schema: {\"summary\": string, \"tips\": [string,string,string], \"drills\": [string,string,string], \"priority\": \"speeding|lane|headway|smooth|compliance\"}. "
+                "Rules: (1) Keep summary <= 160 chars. (2) Tips must be short, actionable, and specific. (3) Choose priority based on weakest weighted dimension."
+            )
+        else:
+            # Realtime observation prompt
+            prompt = (
+                "You are VR Driving Coach AI. Evaluate this driving observation JSON and respond with a SINGLE compact JSON object only, no prose. "
+                "Observation: " + obs + ". "
+                "Output schema: {\"cue\": string|null, \"cue_level\": number|null, \"message\": string, \"notes\": string|null}. "
+                "Rules: (1) Choose at most one cue unless imminent danger. (2) If no issue, set cue=null and write a short positive message. (3) Keep message under 140 chars."
+            )
+        if PAYLOAD_STYLE == "wrapped_input":
+            body = {"input": prompt}
+        else:
+            # default 'wrapped' uses the 'message' field (matches your working curl)
+            body = {"message": prompt}
     try:
-        async with session.post(TOOLHOUSE_URL, json=payload, headers=headers, timeout=5) as resp:
+        async with session.post(TOOLHOUSE_URL, json=body, headers=headers, timeout=timeout_s) as resp:
+            status = resp.status
             try:
-                return await resp.json()
+                body = await resp.json()
             except Exception:
-                # Fallback to text if JSON not returned
-                txt = await resp.text()
-                return {"text": txt, "status": resp.status}
+                body = {"text": await resp.text()}
+            print(f"[coach] forwarded event={payload.get('event')} status={status}")
+            body["status"] = status
+            return body
     except Exception as e:
         print(f"Coach forward error: {e}")
         return None
+
+async def safe_send(ws, obj: dict) -> bool:
+    if getattr(ws, "closed", False):
+        return False
+    try:
+        await ws.send(json.dumps(obj))
+        return True
+    except (ConnectionClosed, ConnectionClosedOK):
+        return False
+    except Exception as e:
+        print(f"Send error: {e}")
+        return False
+
+
+def _fallback_final_coach(final_result: dict) -> dict:
+    subs = final_result.get("subscores", {})
+    final = final_result.get("final", 0)
+    pri = min(subs, key=subs.get) if subs else "headway"
+    tips_map = {
+        "speeding": [
+            "Match speed to posted limit",
+            "Lift early when approaching slower traffic",
+            "Use cruise control to avoid creep",
+        ],
+        "lane": [
+            "Center the car between lines",
+            "Look farther ahead to stabilize steering",
+            "Ease steering inputs—avoid ping‑pong",
+        ],
+        "headway": [
+            "Open following gap to 2–3s",
+            "Brake earlier, lighter when closing",
+            "Avoid tailgating after lane changes",
+        ],
+        "smooth": [
+            "Feather brake before stopping",
+            "Plan ahead—no hard stabs",
+            "Keep throttle steady out of turns",
+        ],
+        "compliance": [
+            "Full stop at reds/stop lines",
+            "Scan for pedestrians before turning",
+            "Approach intersections off‑throttle",
+        ],
+    }
+    drills_map = {
+        "speeding": ["30‑mph road—hold ±1 mph for 2 min", "Practice coasting to limit signs", "Use speed checks every 10s"],
+        "lane": ["Empty lot—center between cones", "Highway—hands light, eyes far", "2‑min no‑correction challenge"],
+        "headway": ["Count 3‑second gap to lead", "Close/open gap smoothly", "Brake at 0.2g then release"],
+        "smooth": ["Stop without ABS engagement", "No throttle spikes for 2 min", "Brake‑to‑zero with no head toss"],
+        "compliance": ["Full stop 1s at line x5", "Red‑light scan left‑center‑right", "Yield practice in empty lot"],
+    }
+    summary = f"Score {final:.0f}/100. Weakest: {pri}. Focus on clean {pri} to lift overall." if subs else "Session complete. See tips."
+    return {
+        "summary": summary,
+        "tips": tips_map.get(pri, tips_map["headway"]),
+        "drills": drills_map.get(pri, drills_map["headway"]),
+        "priority": pri,
+        "source": "fallback",
+    }
 
 async def handler(websocket):
     connection_id = id(websocket)
@@ -66,7 +159,11 @@ async def handler(websocket):
     try:
         async with aiohttp.ClientSession() as session:
             while True:
-                message = await websocket.recv()
+                try:
+                    message = await websocket.recv()
+                except (ConnectionClosed, ConnectionClosedOK):
+                    # client closed the socket gracefully
+                    break
                 if isinstance(message, bytes):
                     # Image data
                     img = cv2.imdecode(np.frombuffer(message, np.uint8), cv2.IMREAD_COLOR)
@@ -113,7 +210,10 @@ async def handler(websocket):
 
                                     cue_fp = _cue_fingerprint(obs)
                                     changed_cue = cue_fp != connections[connection_id]['last_cue_fp']
-                                    should_send = changed_cue and (now - connections[connection_id]['last_forward_ts'] >= FORWARD_MIN_INTERVAL_S)
+                                    last_ts = connections[connection_id]['last_forward_ts']
+                                    first_send_ok = (last_ts == 0.0)
+                                    interval_ok = (now - last_ts) >= FORWARD_MIN_INTERVAL_S
+                                    should_send = changed_cue and (first_send_ok or interval_ok)
                                     coach_reply = None
                                     if should_send:
                                         coach_reply = await forward_to_toolhouse(session, obs)
@@ -122,9 +222,10 @@ async def handler(websocket):
 
                                     # Send cues back to client, include optional coach reply
                                     out = dict(result)
+                                    out["type"] = "inference"
                                     if coach_reply is not None:
                                         out["coach"] = coach_reply
-                                    await websocket.send(json.dumps(out))
+                                    await safe_send(websocket, out)
                             except Exception as e:
                                 print(f"Error calling inference API: {e}")
 
@@ -135,27 +236,32 @@ async def handler(websocket):
                                 async with session.post('http://localhost:8000/end_session') as resp:
                                     final_result = await resp.json()
 
-                                    # Forward final summary to Toolhouse (always send once if configured)
+                                    # Prepare final payload immediately
+                                    out = dict(final_result)
+                                    out["type"] = "final"
+
+                                    # Try to fetch coach quickly; don't block too long
+                                    # Always attempt to fetch coach; wait up to TOOLHOUSE_FINAL_TIMEOUT_S
                                     final_payload = {
                                         "event": "session_end",
                                         "session_id": connections[connection_id]['session_id'],
                                         "final": final_result,
                                     }
-                                    coach_final = await forward_to_toolhouse(session, final_payload)
+                                    coach_final = await forward_to_toolhouse(session, final_payload, timeout_s=TOOLHOUSE_FINAL_TIMEOUT_S)
+                                    if not coach_final or int(coach_final.get("status", 0)) >= 400:
+                                        coach_final = _fallback_final_coach(final_result)
+                                    out["coach"] = coach_final
 
-                                    # Send back to client with optional coach summary
-                                    out = dict(final_result)
-                                    if coach_final is not None:
-                                        out["coach"] = coach_final
-                                    await websocket.send(json.dumps(out))
+                                    await safe_send(websocket, out)
                             except Exception as e:
                                 print(f"Error getting final score: {e}")
                                 # Fallback to dummy result
-                                result = {"grade": "A", "confidence": 0.97}
-                                await websocket.send(json.dumps(result))
+                                result = {"grade": "A", "confidence": 0.97, "type": "final"}
+                                await safe_send(websocket, result)
 
                             connections[connection_id]['frames'].clear()
                             connections[connection_id]['telemetry'].clear()
+                            break
                         else:
                             print("Unknown message type:", message)
     finally:
@@ -171,3 +277,4 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
+ 
