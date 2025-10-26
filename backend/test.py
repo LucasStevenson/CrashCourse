@@ -4,9 +4,9 @@ import json
 
 async def test():
     uri = "ws://localhost:8765"
-    image_path = "./Screen Shot 2025-10-25 at 12.31.39 PM.png"
-    with open(image_path, "rb") as f:
-        image = f.read()
+    # image_path = "./Screen Shot 2025-10-25 at 12.31.39 PM.png"
+    # with open(image_path, "rb") as f:
+    #     image = f.read()
 
     async with websockets.connect(uri) as websocket:
         # await websocket.send(json.dumps(DATA))
