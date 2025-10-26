@@ -9,22 +9,26 @@ async def test():
         image = f.read()
 
     async with websockets.connect(uri) as websocket:
-        # Define some dummy telemetry data to send
-        telemetry_payload = {
-            "t": 0.0,
-            "speed_mps": 20.0, # Example speed to trigger SLOW_DOWN cue
-            "speed_limit_mps": 5.0,
-            "throttle": 0.5,
-            "brake": 0.0,
-            "steer_deg": 0.0,
-            "lane_offset_m": 0.1,
-            "tl_state": "green",
-            "in_stop_zone": False,
-            "collision": False,
-        }
-        await websocket.send(json.dumps(telemetry_payload))
-        await websocket.send(image)
+        # await websocket.send(json.dumps(DATA))
+        # await websocket.send(image)
+        # response = await websocket.recv()
+        await websocket.send("TTS:Testing testing testing testing")
         response = await websocket.recv()
         print(f"Server: {response}")
+        # await websocket.send("TTS:testing testing testing testing")
+        #
+        while True:
+            try:
+                message = await websocket.recv()
+                if isinstance(message, bytes):
+                    print("Received audio chunk")
+                    response += message
+                else:
+                    print(f"Received: {message}")
+            except websockets.exceptions.ConnectionClosedOK:
+                print("Connection closed")
+                break
+        with open("audio_test.mp3", 'wb') as f:
+            f.write(response)
 
 asyncio.run(test())
