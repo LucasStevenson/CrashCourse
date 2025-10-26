@@ -163,6 +163,7 @@ async def handler(websocket):
         if connection_id in connections:
             del connections[connection_id]
 
+
 async def main():
     async with websockets.serve(handler, "localhost", 8765):
         await asyncio.Future()  # run forever

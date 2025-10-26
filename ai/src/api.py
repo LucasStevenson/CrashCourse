@@ -77,6 +77,15 @@ async def infer_frame(
         "detections": len(dets),
     }
 
+@app.post("/infer_frame")
+async def infer_frame(
+    image: UploadFile = File(...),
+    telemetry: str = Form(...),   # <-- accept as string from multipart
+):
+    # This endpoint can now call the new function
+    image_data = await image.read()
+    return process_image_and_telemetry(image_data, telemetry)
+
 @app.post("/end_session")
 async def end_session():
     return scorer.finalize()
