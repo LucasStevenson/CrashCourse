@@ -56,10 +56,9 @@ class ScoringState:
     active_cues: Dict[str,Dict[str,float]]=field(default_factory=dict)  # name -> {level, until}
 
     def step(self, tel: Telemetry, lead_ttc_s: Optional[float]) -> List[Dict[str,Any]]:
-        inst: List[Dict[str,Any]]=[]
         if self.last_t is None:
             self.last_t=tel.t; self.last_brake=tel.brake
-            return inst
+            return []
 
         dt=max(0.0, tel.t-self.last_t); self.total_time+=dt
 
@@ -107,7 +106,9 @@ class ScoringState:
 
         self.last_t=tel.t; self.last_brake=tel.brake
         self._prune_expired()
-        return inst
+
+        # Return the display cues instead of empty list
+        return self.get_display_cues()
 
     def get_display_cues(self) -> List[Dict[str,Any]]:
         now=time.time()

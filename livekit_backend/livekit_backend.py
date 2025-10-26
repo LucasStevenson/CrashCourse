@@ -7,6 +7,8 @@ import aiohttp
 import requests
 import os
 from dotenv import load_dotenv
+import cv2
+import numpy as np
 
 load_dotenv()  # take environment variables
 
@@ -30,23 +32,29 @@ async def main():
         logging.info(
                 "participant connected: %s %s", participant.sid, participant.identity)
 
+    telemetry_cache = {}
+
     async def receive_video_frames(stream: rtc.VideoStream):
         async with aiohttp.ClientSession() as session:
             async for frame in stream:
-                image_bytes = frame.to_bytes()
+                # Convert frame to JPEG bytes properly
+                # Convert the frame to numpy array
+                arr = frame.to_ndarray(format="bgr24")
+                # Encode as JPEG
+                _, image_bytes = cv2.imencode('.jpg', arr)
+                image_bytes = image_bytes.tobytes()
+
                 telemetry_str = telemetry_cache.get("latest", "{}")
                 data = aiohttp.FormData()
                 data.add_field('image', image_bytes, filename='frame.jpg', content_type='image/jpeg')
                 data.add_field('telemetry', telemetry_str)
-                async with session.post('http://localhost:8000/infer_frame', data=data) as resp:
-                    result = await resp.json()
-                    print("Inference result:", result)
 
-    telemetry_cache = {}
-    async def receive_telemetry_data(track: rtc.Track):
-        async for data in track:
-            # Assuming data is bytes of JSON string
-            telemetry_cache["latest"] = data.decode('utf-8')
+                try:
+                    async with session.post('http://localhost:8000/infer_frame', data=data) as resp:
+                        result = await resp.json()
+                        print("Inference result:", result)
+                except Exception as e:
+                    logging.error(f"Error during inference: {e}")
 
     async def receive_telemetry_data(track: rtc.Track):
         while True:
@@ -78,3 +86,10 @@ async def main():
         print(f"participant: {participant}")
         for tid, publication in participant.track_publications.items():
             print(f"\ttrack id: {publication}")
+
+    # Keep the connection alive
+    await asyncio.Future()  # runs forever
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
